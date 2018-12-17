@@ -1,0 +1,180 @@
+<!doctype html>
+<html class="no-js" lang="">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <title>Fun with canvas</title>
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <script type='text/javascript' src='https://cdn.scaledrone.com/scaledrone.min.js'></script>
+</head>
+
+<body>
+<!--[if lte IE 9]>
+<p class="browserupgrade">You are using an <strong>outdated</strong> browser. Please <a href="https://browsehappy.com/">upgrade
+    your browser</a> to improve your experience and security.</p>
+<![endif]-->
+
+<!-- Add your site or application content here -->
+<canvas id="canvas"></canvas>
+
+<style>
+    canvas {
+        width: 100%;
+        height: 100%;
+        background: black;
+    }
+</style>
+
+<script>
+    // Scaledrone room name needs to be prefixed with 'observable-'
+    const ROOM_NAME = 'observable-devtales-gravity-demo';
+
+    const drone = new ScaleDrone('yiS12Ts5RdNhebyM');
+
+
+    // Scaledrone room used for signaling
+    let signalingRoom;
+
+    const WEB_RTC_CONFIG = {
+        iceServers: [{
+            url: 'stun:stun.l.google.com:19302'
+        }]
+    };
+    // RTCPeerConnection
+    let pc;
+    // RTCDataChannel
+    let dataChannel;
+
+    // Wait for Scaledrone signalling server to connect
+    drone.on('open', error => {
+        if (error) {
+            return console.error(error);
+        }
+        signalingRoom = drone.subscribe(ROOM_NAME);
+        signalingRoom.on('open', error => {
+            if (error) {
+                return console.error(error);
+            }
+            console.log('Connected to signaling server');
+        });
+        // We're connected to the room and received an array of 'members'
+        // connected to the room (including us). Signaling server is ready.
+        signalingRoom.on('members', members => {
+            const isOfferer = members.length === 2;
+            startWebRTC(isOfferer);
+        });
+    });
+
+    // Send signaling data via Scaledrone
+    function sendSignalingMessage(message) {
+        drone.publish({
+            room: ROOM_NAME,
+            message
+        });
+    }
+
+    function startWebRTC(isOfferer) {
+        console.log('Starting WebRTC in as', isOfferer ? 'offerer' : 'waiter');
+        pc = new RTCPeerConnection(WEB_RTC_CONFIG);
+
+        // 'onicecandidate' notifies us whenever an ICE agent needs to deliver a
+        // message to the other peer through the signaling server
+        pc.onicecandidate = event => {
+            if (event.candidate) {
+                sendSignalingMessage({'candidate': event.candidate});
+            }
+        };
+
+
+        if (isOfferer) {
+            // If user is offerer let them create a negotiation offer and set up the data channel
+            pc.onnegotiationneeded = () => {
+                pc.createOffer(localDescCreated, error => console.error(error));
+            }
+            dataChannel = pc.createDataChannel('chat');
+            setupDataChannel();
+        } else {
+            // If user is not the offerer let wait for a data channel
+            pc.ondatachannel = event => {
+                dataChannel = event.channel;
+                setupDataChannel();
+            }
+        }
+
+        startListentingToSignals();
+    }
+
+    function startListentingToSignals() {
+        // Listen to signaling data from Scaledrone
+        signalingRoom.on('data', (message, client) => {
+            // Message was sent by us
+            if (client.id === drone.clientId) {
+                return;
+            }
+            if (message.sdp) {
+                // This is called after receiving an offer or answer from another peer
+                pc.setRemoteDescription(new RTCSessionDescription(message.sdp), () => {
+                    console.log('pc.remoteDescription.type', pc.remoteDescription.type);
+                    // When receiving an offer lets answer it
+                    if (pc.remoteDescription.type === 'offer') {
+                        console.log('Answering offer');
+                        pc.createAnswer(localDescCreated, error => console.error(error));
+                    }
+                }, error => console.error(error));
+            } else if (message.candidate) {
+                // Add the new ICE candidate to our connections remote description
+                pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+            }
+        });
+    }
+
+    function localDescCreated(desc) {
+        pc.setLocalDescription(
+            desc,
+            () => sendSignalingMessage({'sdp': pc.localDescription}),
+            error => console.error(error)
+        );
+    }
+
+    // Hook up data channel event handlers
+    function setupDataChannel() {
+        checkDataChannelState();
+        dataChannel.onopen = checkDataChannelState;
+        dataChannel.onclose = checkDataChannelState;
+        dataChannel.onmessage = event =>
+            insertMessageToDOM(JSON.parse(event.data), false)
+    }
+
+    function checkDataChannelState() {
+        console.log('WebRTC channel state is:', dataChannel.readyState);
+        if (dataChannel.readyState === 'open') {
+            insertMessageToDOM({content: 'WebRTC data channel is now open'});
+        }
+    }
+
+    function insertMessageToDOM(options, isFromMe) {
+        console.log(options, isFromMe)
+    }
+
+    const canvas = document.getElementById('canvas');
+    function getMousePos(canvas, evt) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+            x: evt.clientX - rect.left,
+            y: evt.clientY - rect.top
+        };
+    }
+
+    canvas.addEventListener('mousemove', function(evt) {
+        var mousePos = getMousePos(canvas, evt);
+        var message = 'Mouse position: ' + mousePos.x + ',' + mousePos.y;
+        dataChannel.send(JSON.stringify(message));
+        insertMessageToDOM(message, true);
+    }, false);
+</script>
+
+</body>
+
+</html>
